@@ -37,11 +37,15 @@ services:
     ports:
       - "8181:8181"
     environment:
+      - POLARIS_SKIP_CREDENTIAL_SUBSCOPING_INDIRECTION=true
       - POLARIS_PERSISTENCE_TYPE=relational-jdbc
       - QUARKUS_DATASOURCE_JDBC_URL=jdbc:postgresql://polaris-db:5432/polaris
       - QUARKUS_DATASOURCE_USERNAME=polaris
       - QUARKUS_DATASOURCE_PASSWORD=polaris_password
       - QUARKUS_DATASOURCE_DB_KIND=postgresql
+      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=admin
+      - AWS_SECRET_ACCESS_KEY=password
       - POLARIS_REALM_CONTEXT_REALMS=default-realm
       - POLARIS_FEATURES_ALLOW_TABLE_LOCATION_OVERLAP=true
 
