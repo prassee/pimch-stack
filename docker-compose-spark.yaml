@@ -1,0 +1,109 @@
+services:
+  # --- THE PERSISTENCE LAYER ---
+  postgres:
+    image: postgres:14
+    environment:
+      - POSTGRES_DB=metadata_db
+      - POSTGRES_USER=admin
+      - POSTGRES_PASSWORD=password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d metadata_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  # --- STORAGE (MinIO) ---
+  minio:
+    image: minio/minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: password
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+
+  # --- PERSISTENT CATALOG (Apache Polaris) ---
+  polaris:
+    image: apache/polaris:latest
+    ports:
+      - "8181:8181"
+    environment:
+      - POLARIS_PERSISTENCE_TYPE=relational-jdbc
+      - QUARKUS_DATASOURCE_DB_KIND=postgresql
+      - QUARKUS_DATASOURCE_USERNAME=admin
+      - QUARKUS_DATASOURCE_PASSWORD=password
+      - QUARKUS_DATASOURCE_JDBC_URL=jdbc:postgresql://postgres:5432/metadata_db
+    command:
+      - /opt/polaris/bin/polaris
+      - --client-id=root-admin
+      - --client-secret=root-password
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # --- LINEAGE (Marquez) ---
+  marquez:
+    image: marquezproject/marquez:latest
+    ports:
+      - "3000:3000"
+      - "5000:5000"
+    environment:
+      - MARQUEZ_CONFIG=/marquez/config.yaml
+      - MARQUEZ_DB_URL=jdbc:postgresql://postgres:5432/metadata_db
+      - MARQUEZ_DB_USER=admin
+      - MARQUEZ_DB_PASSWORD=password
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # --- COMPUTE (Spark 3-Node Cluster) ---
+  spark-master:
+    image: bitnami/spark:3.5
+    environment:
+      - SPARK_MODE=master
+      - AWS_ACCESS_KEY_ID=admin
+      - AWS_SECRET_ACCESS_KEY=password
+    ports:
+      - "8080:8080"
+
+  spark-worker-1:
+    image: bitnami/spark:3.5
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - AWS_ACCESS_KEY_ID=admin
+      - AWS_SECRET_ACCESS_KEY=password
+    depends_on:
+      - spark-master
+
+  spark-worker-2:
+    image: bitnami/spark:3.5
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - AWS_ACCESS_KEY_ID=admin
+      - AWS_SECRET_ACCESS_KEY=password
+    depends_on:
+      - spark-master
+
+  # --- CENTRAL HISTORY SERVER ---
+  spark-history-server:
+    image: bitnami/spark:3.5
+    entrypoint: ["/opt/bitnami/spark/bin/spark-class", "org.apache.spark.deploy.history.HistoryServer"]
+    environment:
+      - SPARK_HISTORY_OPTS=-Dspark.history.fs.logDirectory=s3a://spark-logs/ -Dspark.hadoop.fs.s3a.endpoint=http://minio:9000 -Dspark.hadoop.fs.s3a.path.style.access=true
+      - AWS_ACCESS_KEY_ID=admin
+      - AWS_SECRET_ACCESS_KEY=password
+    ports:
+      - "18080:18080"
+    depends_on:
+      - minio
+
+volumes:
+  postgres_data:
+  minio_data:
