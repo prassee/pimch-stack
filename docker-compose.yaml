@@ -1,47 +1,50 @@
 services:
-  # Metadata storage for Polaris (JDBC)
   polaris-db:
     image: postgres:16-alpine
     container_name: polaris-db
     environment:
-      POSTGRES_USER: polaris
-      POSTGRES_PASSWORD: polaris_password
-      POSTGRES_DB: polaris_metadata
-    volumes:
-      - polaris_db_data:/var/lib/postgresql/data
+      - POSTGRES_USER=polaris
+      - POSTGRES_PASSWORD=polaris_password
+      - POSTGRES_DB=polaris
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U polaris"]
+      test: ["CMD-SHELL", "pg_isready -U polaris -d polaris"]
       interval: 5s
       timeout: 5s
       retries: 5
 
-  # Apache Polaris
+  # NEW: One-shot service to create the schema and bootstrap the realm
+  polaris-bootstrap:
+    image: apache/polaris-admin-tool:latest
+    container_name: polaris-bootstrap
+    depends_on:
+      polaris-db:
+        condition: service_healthy
+    environment:
+      - POLARIS_PERSISTENCE_TYPE=relational-jdbc
+      - QUARKUS_DATASOURCE_JDBC_URL=jdbc:postgresql://polaris-db:5432/polaris
+      - QUARKUS_DATASOURCE_USERNAME=polaris
+      - QUARKUS_DATASOURCE_PASSWORD=polaris_password
+      - QUARKUS_DATASOURCE_DB_KIND=postgresql
+    command: >
+      bootstrap -r default-realm -c default-realm,root,secret
+
   polaris:
     image: apache/polaris:latest
     container_name: polaris
     depends_on:
-      polaris-db:
-        condition: service_healthy
+      polaris-bootstrap:
+        condition: service_completed_successfully
     ports:
       - "8181:8181"
     environment:
-      # 1. Database Backend Type
       - POLARIS_PERSISTENCE_TYPE=relational-jdbc
-      
-      # 2. Quarkus JDBC Settings (Specific to Polaris 1.x)
-      - QUARKUS_DATASOURCE_JDBC_URL=jdbc:postgresql://polaris-db:5432/polaris_metadata
+      - QUARKUS_DATASOURCE_JDBC_URL=jdbc:postgresql://polaris-db:5432/polaris
       - QUARKUS_DATASOURCE_USERNAME=polaris
       - QUARKUS_DATASOURCE_PASSWORD=polaris_password
       - QUARKUS_DATASOURCE_DB_KIND=postgresql
-      
-      # 3. Features & Bootstrap
+      - POLARIS_REALM_CONTEXT_REALMS=default-realm
       - POLARIS_FEATURES_ALLOW_TABLE_LOCATION_OVERLAP=true
-      - POLARIS_BOOTSTRAP_CREDENTIALS=POLARIS,root,secret
-      - POLARIS_REALM=default-realm
-    # command: >
-    #   ./gradlew run -Dpolaris.bootstrap.credentials=POLARIS,root,secret
 
-  # Minio S3
   minio:
     image: minio/minio
     container_name: minio
@@ -49,20 +52,4 @@ services:
       MINIO_ROOT_USER: admin
       MINIO_ROOT_PASSWORD: password
     ports: ["9000:9000", "9001:9001"]
-    volumes: ["minio_data:/data"]
     command: server /data --console-address ":9001"
-
-  # Bucket Init
-  mc:
-    image: minio/mc
-    depends_on: ["minio"]
-    entrypoint: >
-      /bin/sh -c "
-      until (/usr/bin/mc alias set local http://minio:9000 admin password) do sleep 1; done;
-      /usr/bin/mc mb --ignore-exists local/warehouse;
-      exit 0;
-      "
-
-volumes:
-  polaris_db_data:
-  minio_data:
