@@ -1,25 +1,51 @@
 import requests
 from pyiceberg.catalog import load_catalog
+from pyiceberg.schema import Schema
+from pyiceberg.types import LongType, NestedField, StringType
 
+# Configuration
 POLARIS_URL = "http://localhost:8181"
-CLIENT_ID = "root"
-CLIENT_SECRET = "secret"
+CLIENT_ID = "root"  # Matches the 2nd param in your bootstrap -c
+CLIENT_SECRET = "secret"  # Matches the 3rd param in your bootstrap -c
+REALM = "default-realm"
 CATALOG_NAME = "managed_catalog"
 
 
 def bootstrap():
-    """Initializes the Polaris Catalog via Management API."""
-    token = requests.post(
-        f"{POLARIS_URL}/api/catalog/v1/oauth/tokens",
-        data={
-            "grant_type": "client_credentials",
-            "client_id": CLIENT_ID,
-            "client_secret": CLIENT_SECRET,
-            "scope": "PRINCIPAL_ROLE:ALL",
-        },
-    ).json()["access_token"]
-    print(token)
-    headers = {"Authorization": f"Bearer {token}"}
+    print(f"Requesting OAuth token for realm: {REALM}")
+    token_url = f"{POLARIS_URL}/api/catalog/v1/oauth/tokens"
+
+    # --- THE FIX: Include the Realm header and form data ---
+    headers = {
+        "Polaris-Realm": REALM,
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+
+    data = {
+        "grant_type": "client_credentials",
+        "client_id": CLIENT_ID,
+        "client_secret": CLIENT_SECRET,
+        "scope": "PRINCIPAL_ROLE:ALL",
+    }
+
+    response = requests.post(token_url, headers=headers, data=data)
+
+    if response.status_code != 200:
+        print(f"Token request failed: {response.status_code}")
+        print(f"Response Body: {response.text}")
+        response.raise_for_status()
+
+    token = response.json()["access_token"]
+    print("Token acquired.")
+
+    # 2. Create Catalog
+    print(f"🛠️  Creating catalog: {CATALOG_NAME}")
+    mgmt_headers = {
+        "Authorization": f"Bearer {token}",
+        "Polaris-Realm": REALM,
+        "Content-Type": "application/json",
+    }
+
     catalog_json = {
         "catalog": {
             "name": CATALOG_NAME,
@@ -38,85 +64,49 @@ def bootstrap():
             },
         }
     }
-    requests.post(
-        f"{POLARIS_URL}/api/management/v1/catalogs", json=catalog_json, headers=headers
+
+    resp = requests.post(
+        f"{POLARIS_URL}/api/management/v1/catalogs",
+        json=catalog_json,
+        headers=mgmt_headers,
     )
 
+    if resp.status_code == 201:
+        print(f"Catalog '{CATALOG_NAME}' created.")
+    else:
+        print(f"Catalog status: {resp.status_code} - {resp.text}")
 
-def run_managed_test():
-    # catalog = load_catalog(
-    #     "polaris",
-    #     **{
-    #         "uri": f"{POLARIS_URL}/api/catalog",
-    #         "warehouse": CATALOG_NAME,
-    #         "credential": f"{CLIENT_ID}:{CLIENT_SECRET}",
-    #         "s3.endpoint": "http://localhost:9000",
-    #         "s3.access-key-id": "admin",
-    #         "s3.secret-access-key": "password",
-    #     },
-    # )
 
+def run_test():
+    print("Connecting PyIceberg to Polaris...")
     catalog = load_catalog(
         "polaris",
         **{
-            "uri": "http://localhost:8181/api/catalog",
-            "warehouse": "managed_catalog",
-            "credential": "root:secret",
-            "header.Polaris-Realm": "default-realm",  # <--- MUST match bootstrap realm
+            "uri": f"{POLARIS_URL}/api/catalog",
+            "warehouse": CATALOG_NAME,
+            "scope": "PRINCIPAL_ROLE:ALL",
+            "credential": f"{CLIENT_ID}:{CLIENT_SECRET}",
+            "header.Polaris-Realm": REALM,  # Essential for PyIceberg
             "s3.endpoint": "http://localhost:9000",
             "s3.access-key-id": "admin",
             "s3.secret-access-key": "password",
         },
     )
+    # print(f"name spaces {catalog.list_namespaces()}")
+    # catalog.create_namespace("lakehouse")
 
-    print("\n--- Managed Catalogs ---")
-    for namespace in catalog.list_namespaces():
-        print(namespace)
+    schema = Schema(
+        NestedField(1, "id", LongType(), required=True),
+        NestedField(2, "data", StringType(), required=True),
+        identifier_field_ids=[1],  # Enable Upserts
+    )
+    table_id = "lakehouse.managed_table"
+    table = catalog.create_table(table_id, schema)
 
-    # # 1. Create Namespace
-    # ns = "finance"
-    # if ns not in [n[0] for n in catalog.list_namespaces()]:
-    #     catalog.create_namespace(ns)
-
-    # # 2. Define Schema with Primary Key for Upserts
-    # schema = Schema(
-    #     NestedField(1, "order_id", LongType(), required=True),
-    #     NestedField(2, "customer", StringType(), required=True),
-    #     NestedField(3, "status", StringType(), required=True),
-    #     identifier_field_ids=[1],
-    # )
-
-    # # 3. Create Managed Table
-    # table_id = f"{ns}.orders"
-    # if table_id in [f"{t[0]}.{t[1]}" for t in catalog.list_tables(ns)]:
-    #     table = catalog.load_table(table_id)
-    # else:
-    #     table = catalog.create_table(table_id, schema=schema)
-
-    # # 4. Incremental Load (Upsert)
-    # print("Writing Batch 1...")
-    # df1 = pa.table(
-    #     {"order_id": [1, 2], "customer": ["Alice", "Bob"], "status": ["New", "New"]},
-    #     schema=schema.as_arrow(),
-    # )
-    # table.append(df1)
-
-    # print("Writing Incremental Batch 2 (Upserting ID 2)...")
-    # df2 = pa.table(
-    #     {
-    #         "order_id": [2, 3],
-    #         "customer": ["Bob", "Charlie"],
-    #         "status": ["Shipped", "New"],
-    #     },
-    #     schema=schema.as_arrow(),
-    # )
-    # # Native Upsert handles row-level changes automatically
-    # table.upsert(df=df2, join_cols=["order_id"])
-
-    # print("\n--- Current Managed Table Data ---")
-    # print(table.scan().to_pandas().sort_values("order_id"))
+    print(f"tables: {catalog.list_tables('lakehouse')}")
+    print(table.scan().to_pandas())
 
 
 if __name__ == "__main__":
     # bootstrap()
-    run_managed_test()
+    run_test()
